@@ -26,7 +26,36 @@ st.title("ChatPDF")
 st.write("---")
 
 # OpenAI 키 입력받기 
-openai_key = st.text_input('OPEN_AI_API_KEY', type="password")
+openai_key = st.text_input('OPEN_AI_API_KEY', type="password", help="유효한 OpenAI API 키를 입력하세요")
+
+# 유효성 체크 함수
+@st.cache_data
+def validate_openai_key(api_key):
+    if not api_key or api_key.strip() == "":
+        return False, "API 키를 입력해주세요."
+    
+    try:
+        from langchain_openai import OpenAI
+        test_client = OpenAI(api_key=api_key)
+        # 간단한 테스트 호출 (모델 목록 조회)
+        models = test_client.models.list()
+        return True, "유효한 API 키입니다."
+    except Exception as e:
+        return False, f"유효하지 않은 API 키입니다: {str(e)[:100]}..."
+
+# 키 유효성 체크
+if openai_key:
+    is_valid, message = validate_openai_key(openai_key)
+    if is_valid:
+        st.success(message)
+        st.session_state.api_key_valid = True
+    else:
+        st.error(message)
+        st.session_state.api_key_valid = False
+        st.stop()  # 유효하지 않으면 이후 실행 중단
+else:
+    st.warning("API 키를 입력한 후 진행해주세요.")
+    st.stop()
 
 # 파일 업로드 
 uploaded_file = st.file_uploader("PDF 파일을 올려주세요!", type=['pdf'])
