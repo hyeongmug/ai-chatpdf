@@ -16,6 +16,7 @@ from langchain_core.runnables import RunnablePassthrough
 import streamlit as st
 import tempfile
 import os
+from streamlit_extras.buy_me_a_coffee import button
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -23,9 +24,15 @@ load_dotenv()
 st.title("ChatPDF")
 st.write("---")
 
+# OpenAI 키 입력받기 
+openai_key = st.text_input('OPEN_AI_API_KEY', type="password")
+
 # 파일 업로드 
 uploaded_file = st.file_uploader("PDF 파일을 올려주세요!", type=['pdf'])
 st.write("---")
+
+# Buy me a coffee
+button(username="skygudanr", floating=True, width=221)
 
 # PDF 파일을 저장하고 저장한 PDF를 읽어서 페이지 단위로 분할하여 리턴하는 함수
 def pdf_to_document(upload_file):
@@ -55,6 +62,7 @@ if uploaded_file is not None:
     # Embedding 
     embeddings_model = OpenAIEmbeddings(
         model="text-embedding-3-large",
+        openai_api_key=openai_key
         # dimensions=1024 # 반환될 임베딩 크기 지정
     )
 
