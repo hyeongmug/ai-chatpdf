@@ -17,6 +17,7 @@ import streamlit as st
 import tempfile
 import os
 from streamlit_extras.buy_me_a_coffee import button
+from langchain_classic.callbacks.base import BaseCallbackHandler
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -72,6 +73,15 @@ if uploaded_file is not None:
 
     # Chroma DB
     db = Chroma.from_documents(texts, embeddings_model)
+
+    # 스트리밍 처리할 Handler 생성
+    class StreamHandler(BaseCallbackHandler):
+        def __init__(self, container, initial_text=""):
+            self.container = container
+            self.text=initial_text
+        def on_llm_new_token(self, token: str, **kwargs) -> None:
+            self.text+=token
+            self.container.markdown(self.text)
     
     # User Input
     st.header("PDF에게 질문해보세요!!")
@@ -90,6 +100,9 @@ if uploaded_file is not None:
 
 
             # Generate
+            chat_box = st.empty()
+            stream_handler = StreamHandler(chat_box)
+            generate_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=openai_key, streaming=True, callbacks=[stream_handler])
             def format_docs(docs):
                 return "\n\n".join(doc.page_content for doc in docs)
             rag_chain = (
@@ -98,11 +111,10 @@ if uploaded_file is not None:
                     "question": RunnablePassthrough() # 입력 데이터를 그대로 다음 단계로 전달하는 특별한 Runnable
                 }
                 | prompt
-                | llm
+                | generate_llm
                 | StrOutputParser()
             )
 
             # Question
             result = rag_chain.invoke(question)
-            st.write(result)
 
