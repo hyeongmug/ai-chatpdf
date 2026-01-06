@@ -1,7 +1,10 @@
 # Streamlit Community Cloud의 내장 sqlite3과 Chroma 간 호환성 에러 발생으로 인해 pysqlite3을 사용하는 코드를 추가
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+try:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except Exception:
+    pass
 
 # Import
 from langchain_community.document_loaders import PyPDFLoader
@@ -18,141 +21,131 @@ import tempfile
 import os
 from streamlit_extras.buy_me_a_coffee import button
 from langchain_classic.callbacks.base import BaseCallbackHandler
+from error_handler import ErrorInterceptor, safe_operation
 from dotenv import load_dotenv
 load_dotenv()
+
+# 세션 상태 초기화
+if 'api_key_valid' not in st.session_state: st.session_state.api_key_valid = False
+if 'openai_key' not in st.session_state: st.session_state.openai_key = None
+if 'db_ready' not in st.session_state: st.session_state.db_ready = False
+if 'api_key_error' not in st.session_state: st.session_state.api_key_error = False
 
 # 제목
 st.title("ChatPDF")
 st.write("---")
 
-# OpenAI 키 입력받기 
-openai_key = st.text_input('OPEN_AI_API_KEY', type="password", help="유효한 OpenAI API 키를 입력하세요")
+# OpenAI 키 입력
+openai_key = st.text_input('OPEN_AI_API_KEY', type="password", key="api_key_input")
 
-# 유효성 체크 함수
-@st.cache_data
-def validate_openai_key(api_key):
-    if not api_key or api_key.strip() == "":
-        return False, "API 키를 입력해주세요."
-    
-    try:
-        from openai import OpenAI
-        test_client = OpenAI(api_key=api_key)
-        # 간단한 테스트 호출 (모델 목록 조회)
-        models = test_client.models.list()
-        return True, "유효한 API 키입니다."
-    except Exception as e:
-        error_msg = str(e)
-        if "Invalid Authentication" in error_msg or "401" in error_msg:
-            return False, "인증 오류: 유효하지 않은 API 키입니다."
-        elif "429" in error_msg:
-            return False, "요청 제한 초과: 잠시 후 다시 시도하세요."
-        else:
-            return False, f"연결 오류: {error_msg[:80]}..."
+# 파일 업로드 (항상 표시)
+uploaded_file = st.file_uploader("PDF 파일을 올려주세요!", type=['pdf'], key="pdf_uploader")
+st.write("---")
 
-# 키 유효성 체크
-if openai_key:
-    is_valid, message = validate_openai_key(openai_key)
-    if is_valid:
-        st.success(message)
-        st.session_state.api_key_valid = True
-    else:
-        st.error(message)
-        st.session_state.api_key_valid = False
-        st.stop()  # 유효하지 않으면 이후 실행 중단
-else:
-    st.warning("API 키를 입력한 후 진행해주세요.")
-    st.stop()
-
-# 파일 업로드 (API 키 유효성 확인 후에만 표시)
-if st.session_state.get('api_key_valid', False):
-    uploaded_file = st.file_uploader("PDF 파일을 올려주세요!", type=['pdf'])
-    st.write("---")
-else:
-    st.info("먼저 OpenAI API 키를 입력하고 확인하세요.")
-
-# Buy me a coffee
+# Buy me a coffee (원래 위치)
 button(username="skygudanr", floating=True, width=221)
 
-# PDF 파일을 저장하고 저장한 PDF를 읽어서 페이지 단위로 분할하여 리턴하는 함수
+# API 키 상태에 따른 명확한 안내
+if not openai_key or openai_key.strip() == "":
+    st.warning("🔑 **OpenAI API 키를 입력해주세요**")
+elif not st.session_state.api_key_valid:
+    # 유효성 검사 시도
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+        client.models.list()
+        st.session_state.api_key_valid = True
+        st.session_state.openai_key = openai_key
+        st.session_state.api_key_error = False
+        st.success("✅ **API 키 확인 완료!**")
+        st.rerun()
+    except Exception as e:
+        st.session_state.api_key_valid = False
+        st.session_state.api_key_error = True
+        ErrorInterceptor._handle_error("API_KEY_VALIDATION", e)
+else:
+    # 유효한 키일 때만 다음 단계 진행
+    st.success("✅ API 키 정상")
+
+openai_key = st.session_state.openai_key
+
+# PDF 처리 함수
+@safe_operation
 def pdf_to_document(upload_file):
     temp_dir = tempfile.TemporaryDirectory()
-    temp_filepath = os.path.join(temp_dir.name, uploaded_file.name)
+    temp_filepath = os.path.join(temp_dir.name, upload_file.name)
     with open(temp_filepath, "wb") as f:
-        f.write(uploaded_file.getvalue())
-    # PDF 로더 
+        f.write(upload_file.getvalue())
     loader = PyPDFLoader(temp_filepath)
-    pages = loader.load_and_split() # PDF 문서를 페이지 단위로 분할하여 로드
+    pages = loader.load_and_split()
     return pages
 
-# 업로드된 파일 처리 
-if uploaded_file is not None:
-    pages = pdf_to_document(uploaded_file)
+# PDF 처리 (API 키 유효 + 파일 업로드 시)
+if uploaded_file is not None and st.session_state.api_key_valid and not st.session_state.db_ready:
+    with st.spinner("📖 PDF 처리 중..."):
+        pages = ErrorInterceptor.safe_execute(pdf_to_document, uploaded_file)
+        if pages is None: st.stop()
+        
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=300, chunk_overlap=20, length_function=len, is_separator_regex=False
+        )
+        texts = text_splitter.split_documents(pages)
+        
+        try:
+            import chromadb
+            chromadb.api.client.SharedSystemClient.clear_system_cache()
+        except: pass
+        
+        @safe_operation
+        def create_vector_db():
+            embeddings_model = OpenAIEmbeddings(model="text-embedding-3-large", openai_api_key=openai_key)
+            return Chroma.from_documents(texts, embeddings_model)
+        
+        st.session_state.db = ErrorInterceptor.safe_execute(create_vector_db)
+        if st.session_state.db:
+            st.session_state.db_ready = True
+            st.success("✅ **PDF 처리 완료! 질문 시작하세요.**")
 
-    # Splitter
-    text_splitter = RecursiveCharacterTextSplitter(
-        # 작은 청크 단위로 설정
-        chunk_size=300, # 청크의 최대 길이
-        chunk_overlap=20, # 청크 간 중복되는 영역 길이
-        length_function=len, # 청크 길이 측정 함수를 len으로 설정
-        is_separator_regex=False, # 구분자를 단순한 문자열로 해석
-    )
-    texts = text_splitter.split_documents(pages)
-
-    # Embedding 
-    embeddings_model = OpenAIEmbeddings(
-        model="text-embedding-3-large",
-        openai_api_key=openai_key
-        # dimensions=1024 # 반환될 임베딩 크기 지정
-    )
-
-    # 첫 실행 이후 "Could not connect to tenant default_tenant. Are you sure it exists" 에러 발생시 클라이언트 캐시를 삭제하는 코드 추가 
-    import chromadb
-    chromadb.api.client.SharedSystemClient.clear_system_cache()
-
-    # Chroma DB
-    db = Chroma.from_documents(texts, embeddings_model)
-
-    # 스트리밍 처리할 Handler 생성
+# 질문 UI
+if st.session_state.get('db_ready', False):
     class StreamHandler(BaseCallbackHandler):
-        def __init__(self, container, initial_text=""):
+        def __init__(self, container, initial_text=""): 
             self.container = container
-            self.text=initial_text
+            self.text = initial_text
+        
         def on_llm_new_token(self, token: str, **kwargs) -> None:
-            self.text+=token
-            self.container.markdown(self.text)
+            try:
+                self.text += token
+                self.container.markdown(self.text)
+            except: pass
     
-    # User Input
-    st.header("PDF에게 질문해보세요!!")
-    question = st.text_input("질문을 입력하세요")
+    st.header("💬 PDF에게 질문해보세요!")
+    question = st.text_input("질문을 입력하세요:")
+    
+    if st.button("질문하기", type="primary") and question.strip():
+        with st.spinner("🤔 답변 생성 중..."):
+            try:
+                db = st.session_state.db
+                llm = ChatOpenAI(temperature=0, openai_api_key=openai_key)
+                retriever_from_llm = MultiQueryRetriever.from_llm(retriever=db.as_retriever(), llm=llm)
+                prompt = hub.pull("rlm/rag-prompt")
+                
+                chat_box = st.empty()
+                stream_handler = StreamHandler(chat_box, "**답변:** ")
+                generate_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=openai_key, streaming=True, callbacks=[stream_handler])
+                
+                def format_docs(docs): return "\n\n".join(doc.page_content for doc in docs)
+                
+                rag_chain = (
+                    {"context": retriever_from_llm | format_docs, "question": RunnablePassthrough()}
+                    | prompt | generate_llm | StrOutputParser()
+                )
+                rag_chain.invoke(question)
+            except Exception as e:
+                ErrorInterceptor._handle_error("RAG_GENERATION", e)
 
-    if st.button("질문하기"):
-        with st.spinner("Wait for it..."):
-            # Retriever
-            llm = ChatOpenAI(temperature=0)
-            retriever_from_llm = MultiQueryRetriever.from_llm(
-                retriever=db.as_retriever(), llm=llm
-            )
-
-            # Prompt Template
-            prompt = hub.pull("rlm/rag-prompt")
-
-
-            # Generate
-            chat_box = st.empty()
-            stream_handler = StreamHandler(chat_box)
-            generate_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=openai_key, streaming=True, callbacks=[stream_handler])
-            def format_docs(docs):
-                return "\n\n".join(doc.page_content for doc in docs)
-            rag_chain = (
-                {
-                    "context": retriever_from_llm | format_docs, 
-                    "question": RunnablePassthrough() # 입력 데이터를 그대로 다음 단계로 전달하는 특별한 Runnable
-                }
-                | prompt
-                | generate_llm
-                | StrOutputParser()
-            )
-
-            # Question
-            result = rag_chain.invoke(question)
-
+# 최종 상태 안내
+elif st.session_state.api_key_valid and uploaded_file:
+    st.info("⏳ **PDF 처리 완료 대기 중...**")
+elif st.session_state.api_key_valid:
+    st.info("📄 **PDF 파일을 업로드하세요**")
