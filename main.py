@@ -35,13 +35,19 @@ def validate_openai_key(api_key):
         return False, "API 키를 입력해주세요."
     
     try:
-        from langchain_openai import OpenAI
+        from openai import OpenAI
         test_client = OpenAI(api_key=api_key)
         # 간단한 테스트 호출 (모델 목록 조회)
         models = test_client.models.list()
         return True, "유효한 API 키입니다."
     except Exception as e:
-        return False, f"유효하지 않은 API 키입니다: {str(e)[:100]}..."
+        error_msg = str(e)
+        if "Invalid Authentication" in error_msg or "401" in error_msg:
+            return False, "인증 오류: 유효하지 않은 API 키입니다."
+        elif "429" in error_msg:
+            return False, "요청 제한 초과: 잠시 후 다시 시도하세요."
+        else:
+            return False, f"연결 오류: {error_msg[:80]}..."
 
 # 키 유효성 체크
 if openai_key:
@@ -57,9 +63,12 @@ else:
     st.warning("API 키를 입력한 후 진행해주세요.")
     st.stop()
 
-# 파일 업로드 
-uploaded_file = st.file_uploader("PDF 파일을 올려주세요!", type=['pdf'])
-st.write("---")
+# 파일 업로드 (API 키 유효성 확인 후에만 표시)
+if st.session_state.get('api_key_valid', False):
+    uploaded_file = st.file_uploader("PDF 파일을 올려주세요!", type=['pdf'])
+    st.write("---")
+else:
+    st.info("먼저 OpenAI API 키를 입력하고 확인하세요.")
 
 # Buy me a coffee
 button(username="skygudanr", floating=True, width=221)
